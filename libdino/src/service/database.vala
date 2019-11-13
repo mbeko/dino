@@ -478,7 +478,7 @@ public class Database : Qlite.Database {
         } else {
             string? bare_jid = jid.select({jid.bare_jid}).with(jid.id, "=", id)[jid.bare_jid];
             if (bare_jid != null) {
-                Jid jid_parsed = Jid.parse(bare_jid);
+                Jid jid_parsed = new Jid(bare_jid);
                 jid_table_cache[id] = jid_parsed;
                 jid_table_reverse[jid_parsed] = id;
                 return jid_parsed;

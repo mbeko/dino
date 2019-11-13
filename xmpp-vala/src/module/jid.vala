@@ -20,17 +20,13 @@ public class Jid {
         string? localpart = parsed != null ? (owned) parsed.localpart : null;
         string domainpart = parsed != null ? (owned) parsed.domainpart : jid;
         string? resourcepart = parsed != null ? (owned) parsed.resourcepart : null;
-        this.intern(jid, (owned) localpart, (owned) domainpart, (owned) resourcepart);
+        this.components((owned) localpart, (owned) domainpart, (owned) resourcepart);
     }
 
-    private Jid.intern(owned string jid, owned string? localpart, owned string domainpart, owned string? resourcepart) {
-        this.jid = (owned) jid;
-        this.localpart = (owned) localpart;
-        this.domainpart = (owned) domainpart;
-        this.resourcepart = (owned) resourcepart;
-    }
+    public Jid.components(owned string? _localpart, owned string _domainpart, owned string? resourcepart) {
+        string? localpart = _localpart != null ? _localpart.down() : null;
+        string? domainpart = _domainpart != null ? _domainpart.down() : null;
 
-    public Jid.components(owned string? localpart, owned string domainpart, owned string? resourcepart) {
         string jid = domainpart;
         if (localpart != null) {
             jid = @"$localpart@$jid";
@@ -56,7 +52,7 @@ public class Jid {
         if (slash_index != -1 && resourcepart == "") return null;
         if (at_index != -1 && localpart == "") return null;
 
-        return new Jid.intern(jid, (owned) localpart, (owned) domainpart, (owned) resourcepart);
+        return new Jid.components((owned) localpart, (owned) domainpart, (owned) resourcepart);
     }
 
     public Jid with_resource(string? resourcepart) {

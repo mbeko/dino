@@ -66,7 +66,7 @@ public class Module : BookmarksProvider, XmppStreamModule {
     }
 
     private void on_pupsub_retract(XmppStream stream, Jid jid, string id) {
-        Jid jid_parsed = Jid.parse(id);
+        Jid jid_parsed = new Jid(id);
         Flag? flag = stream.get_flag(Flag.IDENTITY);
         if (flag != null) {
             flag.conferences.unset(jid_parsed);
@@ -76,7 +76,7 @@ public class Module : BookmarksProvider, XmppStreamModule {
 
     private Conference? parse_item_node(StanzaNode conference_node, string id) {
         Conference conference = new Conference();
-        Jid? jid_parsed = Jid.parse(id);
+        Jid? jid_parsed = new Jid(id);
         if (jid_parsed == null || jid_parsed.resourcepart != null) return null;
         conference.jid = jid_parsed;
 

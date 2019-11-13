@@ -18,7 +18,7 @@ public class Item {
 
     private Jid jid_;
     public Jid jid {
-        get { return jid_ ?? (jid_ = Jid.parse(stanza_node.get_attribute(NODE_JID))); }
+        get { return jid_ ?? (jid_ = new Jid(stanza_node.get_attribute(NODE_JID))); }
         set { stanza_node.set_attribute(NODE_JID, value.to_string()); }
     }
 

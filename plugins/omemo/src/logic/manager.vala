@@ -202,7 +202,7 @@ public class Manager : StreamInteractionModule, Object {
         //Fetch the bundle for each new device
         int inc = 0;
         foreach (Row row in db.identity_meta.get_unknown_devices(identity_id, jid.bare_jid.to_string())) {
-            module.fetch_bundle(stream, Jid.parse(row[db.identity_meta.address_name]), row[db.identity_meta.device_id]);
+            module.fetch_bundle(stream, new Jid(row[db.identity_meta.address_name]), row[db.identity_meta.device_id]);
             inc++;
         }
         if (inc > 0) {

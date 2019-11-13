@@ -97,7 +97,7 @@ public class AddAccountDialog : Gtk.Dialog {
 
         // Select Server
         server_entry.changed.connect(() => {
-            Jid? jid = Jid.parse(server_entry.text);
+            Jid? jid = new Jid(server_entry.text);
             select_server_continue.sensitive = jid != null && jid.localpart == null && jid.resourcepart == null;
         });
         select_server_continue.clicked.connect(on_select_server_continue);
@@ -205,7 +205,7 @@ public class AddAccountDialog : Gtk.Dialog {
     }
 
     private void on_jid_entry_changed() {
-        Jid? jid = Jid.parse(jid_entry.text);
+        Jid? jid = new Jid(jid_entry.text);
         if (jid != null && jid.localpart != null && jid.resourcepart == null) {
             sign_in_jid_continue_button.set_sensitive(true);
             jid_entry.secondary_icon_name = null;
@@ -345,7 +345,7 @@ public class AddAccountDialog : Gtk.Dialog {
                     case "password": password = field.get_value_string(); break;
                 }
             }
-            Account account = new Account(new Jid.components(username, server_jid.domainpart, null), null, password, null);
+            Account account = new Account(new Jid(@"$username@$(server_jid.domainpart)"), null, password, null);
             add_activate_account(account);
             show_success();
         } else {

@@ -312,7 +312,7 @@ public class Module : XmppStreamModule {
                 }
                 string? jid_ = x_node.get_deep_attribute("item", "jid");
                 if (jid_ != null) {
-                    Jid? jid = Jid.parse(jid_);
+                    Jid? jid = new Jid(jid_);
                     flag.set_real_jid(presence.from, jid);
                     if (affiliation != null) {
                         stream.get_flag(Flag.IDENTITY).set_offline_member(presence.from, jid, affiliation);

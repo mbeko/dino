@@ -116,7 +116,7 @@ public class Candidate : Socks5Bytestreams.Proxy {
         string? cid = candidate.get_attribute("cid");
         string? host = candidate.get_attribute("host");
         string? jid_str = candidate.get_attribute("jid");
-        Jid? jid = jid_str != null ? Jid.parse(jid_str) : null;
+        Jid? jid = jid_str != null ? new Jid(jid_str) : null;
         int port = candidate.get_attribute("port") != null ? candidate.get_attribute_int("port") : 1080;
         int priority = candidate.get_attribute_int("priority");
         string? type_str = candidate.get_attribute("type");

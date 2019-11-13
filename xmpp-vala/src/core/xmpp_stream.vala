@@ -43,7 +43,7 @@ public class XmppStream {
     }
 
     public async void connect(string? remote_name = null) throws IOStreamError {
-        if (remote_name != null) this.remote_name = Jid.parse(remote_name);
+        if (remote_name != null) this.remote_name = new Jid(remote_name);
         attach_negotation_modules();
         try {
             int min_priority = -1;
