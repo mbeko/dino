@@ -7,7 +7,7 @@ using Dino.Entities;
 namespace Dino {
 
 public class Database : Qlite.Database {
-    private const int VERSION = 9;
+    private const int VERSION = 10;
 
     public class AccountTable : Table {
         public Column<int> id = new Column.Integer("id") { primary_key = true, auto_increment = true };
@@ -184,6 +184,20 @@ public class Database : Qlite.Database {
         }
     }
 
+    public class MamCatchupTable : Table {
+        public Column<int> id = new Column.Integer("id") { primary_key = true, auto_increment = true };
+        public Column<int> account_id = new Column.Integer("account_id") { not_null = true };
+        public Column<string> from_id = new Column.Text("from_id");
+        public Column<long> from_time = new Column.Long("from_time") { not_null = true };
+        public Column<string> to_id = new Column.Text("to_id");
+        public Column<long> to_time = new Column.Long("to_time") { not_null = true };
+
+        internal MamCatchupTable(Database db) {
+            base(db, "mam_catchup");
+            init({id, account_id, from_id, from_time, to_id, to_time});
+        }
+    }
+
     public class SettingsTable : Table {
         public Column<int> id = new Column.Integer("id") { primary_key = true, auto_increment = true };
         public Column<string> key = new Column.Text("key") { unique = true, not_null = true };
@@ -205,6 +219,7 @@ public class Database : Qlite.Database {
     public AvatarTable avatar { get; private set; }
     public EntityFeatureTable entity_feature { get; private set; }
     public RosterTable roster { get; private set; }
+    public MamCatchupTable mam_catchup { get; private set; }
     public SettingsTable settings { get; private set; }
 
     public Map<int, Jid> jid_table_cache = new HashMap<int, Jid>();
@@ -223,8 +238,9 @@ public class Database : Qlite.Database {
         avatar = new AvatarTable(this);
         entity_feature = new EntityFeatureTable(this);
         roster = new RosterTable(this);
+        mam_catchup = new MamCatchupTable(this);
         settings = new SettingsTable(this);
-        init({ account, jid, content_item, message, real_jid, file_transfer, conversation, avatar, entity_feature, roster, settings });
+        init({ account, jid, content_item, message, real_jid, file_transfer, conversation, avatar, entity_feature, roster, mam_catchup, settings });
         try {
             exec("PRAGMA synchronous=0");
         } catch (Error e) { }
@@ -277,6 +293,15 @@ public class Database : Qlite.Database {
                     message.id in (select info from file_transfer where info not null)""");
             } catch (Error e) {
                 error("Failed to upgrade to database version 9: %s", e.message);
+            }
+        }
+        if (oldVersion < 10) {
+            try {
+                exec("""
+                insert into mam_catchup (account_id, from_time, to_time)
+                select account_id, min(local_time), max(local_time) from message where type=1 group by account_id""");
+            } catch (Error e) {
+                error("Failed to upgrade to database version 10: %s", e.message);
             }
         }
     }

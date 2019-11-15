@@ -54,13 +54,13 @@ public class NotificationEvents : StreamInteractionModule, Object {
             mam_available = stream.get_flag(Xep.MessageArchiveManagement.Flag.IDENTITY) != null;
         }
 
-        if (mam_available && !synced_accounts.contains(conversation.account)) {
-            if (!mam_potential_new.has_key(conversation.account)) {
-                mam_potential_new[conversation.account] = new HashMap<Conversation, ContentItem>(Conversation.hash_func, Conversation.equals_func);
-            }
-            mam_potential_new[conversation.account][conversation] = item;
-            return;
-        }
+//        if (mam_available && !synced_accounts.contains(conversation.account)) {
+//            if (!mam_potential_new.has_key(conversation.account)) {
+//                mam_potential_new[conversation.account] = new HashMap<Conversation, ContentItem>(Conversation.hash_func, Conversation.equals_func);
+//            }
+//            mam_potential_new[conversation.account][conversation] = item;
+//            return;
+//        }
         if (!should_notify(item, conversation)) return;
         if (stream_interactor.get_module(ChatInteraction.IDENTITY).is_active_focus()) return;
         notify_content_item(item, conversation);

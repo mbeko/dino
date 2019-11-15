@@ -14,10 +14,7 @@ public class Module : XmppStreamModule {
 
     private ReceivedPipelineListener received_pipeline_listener = new ReceivedPipelineListener();
 
-    public delegate void OnFinished(XmppStream stream);
-    public void query_archive(XmppStream stream, string? jid, DateTime? start, DateTime? end, owned OnFinished? on_finished = null) {
-        if (stream.get_flag(Flag.IDENTITY) == null) return;
-
+    private StanzaNode crate_base_query(XmppStream stream, string? jid, DateTime? start, DateTime? end) {
         DataForms.DataForm data_form = new DataForms.DataForm();
         DataForms.DataForm.HiddenField form_type_field = new DataForms.DataForm.HiddenField() { var="FORM_TYPE" };
         form_type_field.set_value_string(NS_VER(stream));
@@ -38,8 +35,30 @@ public class Module : XmppStreamModule {
             data_form.add_field(field);
         }
         StanzaNode query_node = new StanzaNode.build("query", NS_VER(stream)).add_self_xmlns().put_node(data_form.get_submit_node());
+        return query_node;
+    }
+
+    public async Iq.Stanza? query_archive(XmppStream stream, string? jid, DateTime? start_time, string? start_id, DateTime? end_time, string? end_id) {
+        if (stream.get_flag(Flag.IDENTITY) == null) return null;
+
+        var query_node = crate_base_query(stream, jid, start_time, end_time);
+        var before_node = new StanzaNode.build("before", "http://jabber.org/protocol/rsm");
+        if (end_id != null) {
+            before_node.put_node(new StanzaNode.text(end_id));
+        }
+        query_node.put_node((new StanzaNode.build("set", "http://jabber.org/protocol/rsm")).add_self_xmlns().put_node(before_node));
         Iq.Stanza iq = new Iq.Stanza.set(query_node);
-        stream.get_module(Iq.Module.IDENTITY).send_iq(stream, iq, (stream, iq) => { page_through_results(stream, iq, (owned)on_finished); });
+
+        print(@"OUT INIT: $(iq.stanza)\n");
+
+        Iq.Stanza? result_iq = null;
+        stream.get_module(Iq.Module.IDENTITY).send_iq(stream, iq, (stream, iq) => {
+            result_iq = iq;
+            Idle.add(query_archive.callback);
+        });
+        yield;
+
+        return result_iq;
     }
 
     public override void attach(XmppStream stream) {
@@ -54,22 +73,30 @@ public class Module : XmppStreamModule {
     public override string get_ns() { return NS_URI; }
     public override string get_id() { return IDENTITY.id; }
 
-    private static void page_through_results(XmppStream stream, Iq.Stanza iq, owned OnFinished? on_finished = null) {
-        string? last = iq.stanza.get_deep_string_content(NS_VER(stream) + ":fin", "http://jabber.org/protocol/rsm" + ":set", "last");
-        if (last == null) {
-            stream.get_flag(Flag.IDENTITY).cought_up = true;
-            if (on_finished != null) on_finished(stream);
-            return;
+    public async Iq.Stanza? page_through_results(XmppStream stream, string? jid, DateTime? start_time, DateTime? end_time, Iq.Stanza iq) {
+
+        string? complete = iq.stanza.get_deep_attribute("urn:xmpp:mam:2:fin", "complete");
+        if (complete == "true") {
+            return null;
+        }
+        string? first = iq.stanza.get_deep_string_content(NS_VER(stream) + ":fin", "http://jabber.org/protocol/rsm" + ":set", "first");
+        if (first == null) {
+            return null;
         }
 
-        Iq.Stanza paging_iq = new Iq.Stanza.set(
-                new StanzaNode.build("query", NS_VER(stream)).add_self_xmlns().put_node(
-                    new StanzaNode.build("set", "http://jabber.org/protocol/rsm").add_self_xmlns().put_node(
-                        new StanzaNode.build("after", "http://jabber.org/protocol/rsm").put_node(new StanzaNode.text(last))
-                    )
-                )
-            );
-        stream.get_module(Iq.Module.IDENTITY).send_iq(stream, paging_iq, (stream, iq) => { page_through_results(stream, iq, (owned)on_finished); });
+        var query_node = crate_base_query(stream, jid, start_time, end_time);
+        query_node.put_node(new StanzaNode.build("set", "http://jabber.org/protocol/rsm").add_self_xmlns().put_node(new StanzaNode.build("before", "http://jabber.org/protocol/rsm").put_node(new StanzaNode.text(first))));
+
+        Iq.Stanza paging_iq = new Iq.Stanza.set(query_node);
+
+        Iq.Stanza? result_iq = null;
+        stream.get_module(Iq.Module.IDENTITY).send_iq(stream, paging_iq, (stream, iq) => {
+            result_iq = iq;
+            Idle.add(page_through_results.callback);
+        });
+        yield;
+
+        return result_iq;
     }
 
     private void query_availability(XmppStream stream) {
@@ -106,7 +133,8 @@ public class ReceivedPipelineListener : StanzaListener<MessageStanza> {
 
             StanzaNode? forward_node = message.stanza.get_deep_subnode(NS_VER(stream) + ":result", "urn:xmpp:forward:0:forwarded", DelayedDelivery.NS_URI + ":delay");
             DateTime? datetime = DelayedDelivery.Module.get_time_for_node(forward_node);
-            message.add_flag(new MessageFlag(datetime));
+            string? mam_id = message.stanza.get_deep_attribute(NS_VER(stream) + ":result", NS_VER(stream) + ":id");
+            message.add_flag(new MessageFlag(datetime, mam_id));
 
             message.stanza = message_node;
             message.rerun_parsing = true;
@@ -132,9 +160,11 @@ public class MessageFlag : Xmpp.MessageFlag {
     public const string ID = "message_archive_management";
 
     public DateTime? server_time { get; private set; }
+    public string? mam_id { get; private set; }
 
-    public MessageFlag(DateTime? server_time) {
+    public MessageFlag(DateTime? server_time, string? mam_id) {
         this.server_time = server_time;
+        this.mam_id = mam_id;
     }
 
     public static MessageFlag? get_flag(MessageStanza message) { return (MessageFlag) message.get_flag(NS_URI, ID); }

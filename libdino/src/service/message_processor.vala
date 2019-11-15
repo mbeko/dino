@@ -2,6 +2,7 @@ using Gee;
 
 using Xmpp;
 using Dino.Entities;
+using Qlite;
 
 namespace Dino {
 
@@ -20,6 +21,8 @@ public class MessageProcessor : StreamInteractionModule, Object {
     private StreamInteractor stream_interactor;
     private Database db;
     private Object lock_send_unsent;
+    private HashMap<Account, int> current_catchup_id = new HashMap<Account, int>(Account.hash_func, Account.equals_func);
+    private HashMap<string, DateTime> mam_times = new HashMap<string, DateTime>();
 
     public static void start(StreamInteractor stream_interactor, Database db) {
         MessageProcessor m = new MessageProcessor(stream_interactor, db);
@@ -29,14 +32,22 @@ public class MessageProcessor : StreamInteractionModule, Object {
     private MessageProcessor(StreamInteractor stream_interactor, Database db) {
         this.stream_interactor = stream_interactor;
         this.db = db;
-        stream_interactor.account_added.connect(on_account_added);
-        stream_interactor.connection_manager.connection_state_changed.connect((account, state) => {
-            if (state == ConnectionManager.ConnectionState.CONNECTED) send_unsent_messages(account);
-        });
+
         received_pipeline.connect(new DeduplicateMessageListener(db));
         received_pipeline.connect(new FilterMessageListener());
         received_pipeline.connect(new StoreMessageListener(stream_interactor));
         received_pipeline.connect(new MamMessageListener(stream_interactor));
+
+        stream_interactor.account_added.connect(on_account_added);
+
+        stream_interactor.connection_manager.connection_state_changed.connect((account, state) => {
+            if (state == ConnectionManager.ConnectionState.CONNECTED) send_unsent_messages(account);
+        });
+
+        stream_interactor.connection_manager.stream_opened.connect((account, stream) => {
+            print(@"setting catchup_id to -1 $(account.bare_jid)\n");
+            current_catchup_id[account] = -1;
+        });
     }
 
     public Entities.Message send_text(string text, Conversation conversation) {
@@ -65,22 +76,234 @@ public class MessageProcessor : StreamInteractionModule, Object {
         stream_interactor.module_manager.get_module(account, Xmpp.MessageModule.IDENTITY).received_message.connect( (stream, message) => {
             on_message_received.begin(account, message);
         });
+        XmppStream? stream_bak = null;
+        current_catchup_id[account] = -1;
         stream_interactor.module_manager.get_module(account, Xmpp.Xep.MessageArchiveManagement.Module.IDENTITY).feature_available.connect( (stream) => {
-            DateTime start_time = account.mam_earliest_synced.to_unix() > 60 ? account.mam_earliest_synced.add_minutes(-1) : account.mam_earliest_synced;
-            stream.get_module(Xep.MessageArchiveManagement.Module.IDENTITY).query_archive(stream, null, start_time, null, () => {
-                history_synced(account);
-            });
+            if (stream == stream_bak) return;
+
+            current_catchup_id[account] = -1;
+            stream_bak = stream;
+            print(@"feature available current_catchup_id $(current_catchup_id[account])\n");
+            do_mam_catchup.begin(account);
         });
+    }
+
+    private async void do_mam_catchup(Account account) {
+        print(@"Do mam catchup! $(account.bare_jid)\n");
+        Row? recent_row = null;
+        foreach (Row a in db.mam_catchup.select()
+                .with(db.mam_catchup.account_id, "=", account.id)
+                .order_by(db.mam_catchup.id, "DESC")) {
+            if (a[db.mam_catchup.id] > 0 && a[db.mam_catchup.id] != current_catchup_id[account]) {
+                recent_row = a;
+                break;
+            }
+        }
+        if (recent_row != null) {
+            print(@"normal start, recent: $(recent_row[db.mam_catchup.id])\n");
+            int db_id = recent_row[db.mam_catchup.id];
+            string to_id = recent_row[db.mam_catchup.to_id];
+            DateTime to_time = new DateTime.from_unix_utc(recent_row[db.mam_catchup.to_time]);
+            yield get_mam_range(account, null, to_time, to_id, null, null);
+            if (current_catchup_id[account] != -1) {
+                print("stuff happened since last time.\n");
+                merge_ranges(account, db_id, current_catchup_id[account]);
+            } else {
+                print(@"nothing happened since last start. use last db id: $db_id\n");
+                current_catchup_id[account] = db_id;
+                print(@"current_catchup_id $(current_catchup_id[account])\n");
+            }
+        } else {
+            print("very first start\n");
+            yield get_mam_range(account, null, null, null, null, null);
+        }
+
+        int last_db_id = -1;
+        string? last_from_id = null;
+        DateTime? last_from_time = null;
+        string? last_to_id = null;
+        DateTime? last_to_time = null;
+
+        foreach (Row row in db.mam_catchup.select()
+                .with(db.mam_catchup.account_id, "=", account.id)
+                .order_by(db.mam_catchup.id, "DESC")) {
+            print(@"going through: $(row[db.mam_catchup.id])\n");
+
+            if (last_db_id != -1) {
+                int db_id = row[db.mam_catchup.id];
+                string to_id = row[db.mam_catchup.to_id];
+                DateTime? to_time = null;
+                if (row[db.mam_catchup.to_time] != -1) to_time = new DateTime.from_unix_utc(row[db.mam_catchup.to_time]);
+                print(@"merging $(to_time) - $(last_from_time)\n");
+
+                yield get_mam_range(account, last_db_id, to_time, to_id, last_from_time, last_from_id);
+                yield merge_ranges(account, db_id, last_db_id);
+            }
+
+            assert(!db.mam_catchup.from_time.is_null(row));
+            assert(!db.mam_catchup.to_time.is_null(row));
+            last_db_id = row[db.mam_catchup.id];
+            last_from_id = row[db.mam_catchup.from_id];
+            last_to_id = row[db.mam_catchup.to_id];
+            last_from_time = new DateTime.from_unix_utc(row[db.mam_catchup.from_time]);
+            last_to_time = new DateTime.from_unix_utc(row[db.mam_catchup.to_time]);
+        }
+
+        if (last_db_id != -1 && last_from_time.to_unix() != -1) { // == current_catchup_id
+            print("catchup last thingi\n");
+            print(@"$last_from_time\n");
+            if (last_from_id != null) print(@"$last_from_id\n");
+            yield get_mam_range(account, last_db_id, null, null, last_from_time, last_from_id);
+
+            db.mam_catchup.update()
+                    .with(db.mam_catchup.id, "=", last_db_id)
+                    .set(db.mam_catchup.from_time, -1)
+                    .perform();
+            print("cought all the way up\n");
+        } else {
+            print("already at the end\n");
+        }
+    }
+
+    private async void merge_ranges(Account account, int earlier_id, int later_id) {
+        foreach (Row row in db.mam_catchup.select()
+                .with(db.mam_catchup.id, "=", later_id)) {
+            string later_to_id = row[db.mam_catchup.to_id];
+            long later_to_time = row[db.mam_catchup.to_time];
+
+            db.mam_catchup.update()
+                    .with(db.mam_catchup.id, "=", earlier_id)
+                    .set(db.mam_catchup.to_id, later_to_id)
+                    .set(db.mam_catchup.to_time, later_to_time)
+                    .perform();
+
+            // Merged back our current range, thus use the last id
+            if (later_id == current_catchup_id[account]) {
+                print(@"current_catchup_id was $(current_catchup_id[account]) now $earlier_id\n");
+                current_catchup_id[account] = earlier_id;
+            }
+
+            db.mam_catchup.delete().with(db.mam_catchup.id, "=", later_id).perform();
+            break;
+        }
+    }
+
+    private async bool get_mam_range(Account account, int? id, DateTime? from_time, string? from_id, DateTime? to_time, string? to_id) {
+        print(@"get_mam_range\n");
+        if (from_time != null) print(@"$(from_time)\n");
+        if (to_time != null) print(@"$(to_time)\n");
+        XmppStream stream = stream_interactor.get_stream(account);
+
+        long query_time = (long)(new DateTime.now_utc()).to_unix();
+        Iq.Stanza? iq = yield stream.get_module(Xep.MessageArchiveManagement.Module.IDENTITY).query_archive(stream, null, from_time, from_id, to_time, to_id);
+
+        if (iq == null) {
+            return false;
+        }
+
+        if (iq.stanza.get_deep_string_content("urn:xmpp:mam:2:fin", "http://jabber.org/protocol/rsm" + ":set", "first") == null) {
+            return false;
+        }
+
+        while (iq != null) {
+            string? earliest_id = iq.stanza.get_deep_string_content("urn:xmpp:mam:2:fin", "http://jabber.org/protocol/rsm" + ":set", "first");
+
+            if (earliest_id != null) print(@"update from_id $(earliest_id)\n");
+            if (id != null || current_catchup_id[account] != -1) {
+                // Update existing id
+                var qry = db.mam_catchup.update()
+                        .set(db.mam_catchup.from_id, earliest_id);
+                if (mam_times.has_key(earliest_id)) {
+                    qry.set(db.mam_catchup.from_time, (long)mam_times[earliest_id].to_unix());
+                } else {
+                    // wait for the stanza to be processed
+                    Timeout.add_seconds(1, () => {
+                        print("waiting ");
+                        if (mam_times.has_key(earliest_id)) {
+                            print("good");
+                            qry.set(db.mam_catchup.from_time, (long)mam_times[earliest_id].to_unix());
+                        }
+                        print("\n");
+                        Idle.add(get_mam_range.callback);
+                        return false;
+                    });
+                    yield;
+                }
+                if (id != null) {
+                    qry.with(db.mam_catchup.id, "=", id).perform();
+                } else if (current_catchup_id[account] != -1) {
+                    qry.with(db.mam_catchup.id, "=", current_catchup_id[account]).perform();
+                }
+            } else if (current_catchup_id[account] == -1 && to_id == null) {
+                // We get our first MAM page before getting another message
+                print(@"We get our first MAM page before getting another message\n$(iq.stanza)\n");
+                string? latest_id = iq.stanza.get_deep_string_content("urn:xmpp:mam:2:fin", "http://jabber.org/protocol/rsm" + ":set", "first");
+                current_catchup_id[account] = (int)db.mam_catchup.insert()
+                    .value(db.mam_catchup.account_id, account.id)
+                    .value(db.mam_catchup.from_id, earliest_id)
+                    .value(db.mam_catchup.from_time, query_time)
+                    .value(db.mam_catchup.to_id, latest_id)
+                    .value(db.mam_catchup.to_time, query_time)
+                    .perform();
+                // TODO save from_time
+            }
+
+            int wait_ms = 0;
+            if (mam_times.has_key(earliest_id)) {
+                if (mam_times[earliest_id].compare((new DateTime.now_utc()).add_days(-14)) < 0) {
+                    wait_ms = 1000;
+                } else if (mam_times[earliest_id].compare((new DateTime.now_utc()).add_days(-2)) < 0) {
+                    wait_ms = 100;
+                }
+            }
+            Timeout.add(wait_ms, () => {
+                stream.get_module(Xep.MessageArchiveManagement.Module.IDENTITY).page_through_results.begin(stream, null, from_time, to_time, iq, (_, res) => {
+                    iq = stream.get_module(Xep.MessageArchiveManagement.Module.IDENTITY).page_through_results.end(res);
+                    Idle.add(get_mam_range.callback);
+                });
+                return false;
+            });
+            yield;
+        }
+
+        return true;
     }
 
     private async void on_message_received(Account account, Xmpp.MessageStanza message_stanza) {
         Entities.Message message = yield parse_message_stanza(account, message_stanza);
 
         Conversation? conversation = stream_interactor.get_module(ConversationManager.IDENTITY).get_conversation_for_message(message);
-        if (conversation != null) {
-            bool abort = yield received_pipeline.run(message, message_stanza, conversation);
-            if (abort) return;
+        if (conversation == null) return;
+
+        // MAM state database update
+        Xep.MessageArchiveManagement.MessageFlag mam_flag = Xep.MessageArchiveManagement.MessageFlag.get_flag(message_stanza);
+        if (mam_flag == null) {
+            if (current_catchup_id[account] != -1) {
+                var qry = db.mam_catchup.update()
+                        .with(db.mam_catchup.id, "=", current_catchup_id[account])
+                        .set(db.mam_catchup.to_time, (long)message.local_time.to_unix()); // TODO we know the server id
+                qry.perform();
+            }
+
+            if (current_catchup_id[account] == -1 && message.body != null && message.type_ == Message.Type.CHAT) {
+                print("insert bacause on msg rec\n");
+                print(message_stanza.stanza.to_string());
+                print(@"current_catchup_id $(current_catchup_id[account])\n");
+                var qry = db.mam_catchup.insert()
+                        .value(db.mam_catchup.account_id, account.id)
+                        .value(db.mam_catchup.from_time, (long)message.local_time.to_unix())
+                        .value(db.mam_catchup.to_time, (long)message.local_time.to_unix()); // TODO we know the server id
+                current_catchup_id[account] = (int)qry.perform();
+                print(@"current_catchup_id $(current_catchup_id[account])\n");
+            }
+        } else {
+            mam_times[mam_flag.mam_id] = mam_flag.server_time;
+//            print(@"    $(mam_flag.server_time) $(mam_flag.mam_id) $(message.body ?? "")\n");
         }
+
+        bool abort = yield received_pipeline.run(message, message_stanza, conversation);
+        if (abort) return;
+
         if (message.direction == Entities.Message.DIRECTION_RECEIVED) {
             message_received(message, conversation);
         } else if (message.direction == Entities.Message.DIRECTION_SENT) {
